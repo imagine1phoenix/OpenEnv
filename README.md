@@ -302,7 +302,24 @@ Request:
 {"task_id": "task_easy"}
 ```
 
-Response: `EmailObservation` JSON object.
+Response:
+
+```json
+{
+  "observation": {
+    "email_id": "easy-001",
+    "subject": "Quarterly invoice available",
+    "body": "...",
+    "sender": "accounts@vendor-example.com",
+    "timestamp": "2026-03-25T09:15:00Z",
+    "thread_history": ["..."],
+    "task_id": "task_easy",
+    "step_number": 0,
+    "total_emails": 1
+  },
+  "info": {"task_id": "task_easy", "step": 0}
+}
+```
 
 ### POST /step
 
@@ -321,7 +338,7 @@ Response:
 ```json
 {
   "observation": {},
-  "reward": {"score": 0.85, "breakdown": {}, "feedback": "..."},
+  "reward": 0.85,
   "done": false,
   "info": {"step": 1, "task_id": "task_easy"}
 }
