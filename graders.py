@@ -44,6 +44,37 @@ def _route_matches(action_route: str, expected_route: str) -> bool:
     return normalized_expected in normalized_action
 
 
+def _summary_keyword_score(summary_text: str, ground_truth: dict) -> float:
+    """Score summary quality using deterministic keyword overlap.
+
+    Args:
+        summary_text: Summary text produced by the agent.
+        ground_truth: Ground-truth dict that may include summary keywords.
+
+    Returns:
+        Score in [0.0, 1.0] based on matched summary keywords.
+    """
+    raw_keywords = ground_truth.get("summary_keywords", [])
+    if not isinstance(raw_keywords, list):
+        return 1.0 if len(summary_text.strip()) >= 10 else 0.0
+
+    keywords = [
+        _normalized_text(str(keyword))
+        for keyword in raw_keywords
+        if _normalized_text(str(keyword))
+    ]
+    if not keywords:
+        return 1.0 if len(summary_text.strip()) >= 10 else 0.0
+
+    normalized_summary = _normalized_text(summary_text)
+    matches = 0
+    for keyword in keywords:
+        if keyword in normalized_summary:
+            matches += 1
+
+    return matches / len(keywords)
+
+
 def grade_easy(action: TriageAction, ground_truth: dict) -> RewardResult:
     """Grade easy task with deterministic partial credit.
 
@@ -59,26 +90,18 @@ def grade_easy(action: TriageAction, ground_truth: dict) -> RewardResult:
 
     label_correct = _normalized_text(action.label) == expected_label
     route_correct = _route_matches(action.route_to, expected_route)
+    summary_score = _summary_keyword_score(action.summary, ground_truth)
 
-    if label_correct and route_correct:
-        score_value = 1.0
-    elif route_correct:
-        score_value = 0.3
-    elif label_correct:
-        score_value = 0.6
-    else:
-        score_value = 0.0
+    score_value = (0.6 if label_correct else 0.0) + (0.25 if route_correct else 0.0)
+    score_value += 0.15 * summary_score
 
     score_value = _clip_score(score_value)
     breakdown = {
         "label_match": 1.0 if label_correct else 0.0,
         "route_match": 1.0 if route_correct else 0.0,
+        "summary_match": round(summary_score, 4),
     }
-    feedback = (
-        "Correct label and route."
-        if score_value == 1.0
-        else "Partial credit applied based on label or routing correctness."
-    )
+    feedback = "Easy-task grading completed with context summary scoring."
     return RewardResult(score=score_value, breakdown=breakdown, feedback=feedback)
 
 
@@ -104,6 +127,7 @@ def grade_medium(actions: list[TriageAction], ground_truths: list[dict]) -> Rewa
     weight_sum = 0.0
     label_hits = 0
     route_hits = 0
+    summary_total = 0.0
 
     for index in range(comparable_count):
         action = actions[index]
@@ -116,9 +140,11 @@ def grade_medium(actions: list[TriageAction], ground_truths: list[dict]) -> Rewa
 
         label_correct = _normalized_text(action.label) == expected_label
         route_correct = _route_matches(action.route_to, expected_route)
+        summary_score = _summary_keyword_score(action.summary, truth)
 
-        # Label carries most of the score; route correctness supplies dense signal.
-        per_email_score = (0.7 if label_correct else 0.0) + (0.3 if route_correct else 0.0)
+        # Label carries most weight; routing and contextual summary add dense signal.
+        per_email_score = (0.55 if label_correct else 0.0) + (0.3 if route_correct else 0.0)
+        per_email_score += 0.15 * summary_score
         per_email_score = _clip_score(per_email_score)
 
         weighted_score_sum += per_email_score * priority_weight
@@ -126,6 +152,7 @@ def grade_medium(actions: list[TriageAction], ground_truths: list[dict]) -> Rewa
 
         label_hits += 1 if label_correct else 0
         route_hits += 1 if route_correct else 0
+        summary_total += summary_score
 
     weighted_average = weighted_score_sum / weight_sum if weight_sum > 0.0 else 0.0
     score_value = _clip_score(weighted_average)
@@ -134,6 +161,7 @@ def grade_medium(actions: list[TriageAction], ground_truths: list[dict]) -> Rewa
         "emails_scored": float(comparable_count),
         "label_accuracy": label_hits / comparable_count,
         "route_accuracy": route_hits / comparable_count,
+        "summary_accuracy": summary_total / comparable_count,
         "weighted_average": score_value,
     }
     feedback = "Weighted medium-task grading completed."
@@ -159,12 +187,14 @@ def grade_hard(action: TriageAction, ground_truth: dict) -> RewardResult:
     has_primary_route = _route_matches(normalized_route, primary_route)
     has_secondary_route = _route_matches(normalized_route, secondary_route)
     urgent_label = _normalized_text(action.label) == expected_label
+    summary_score = _summary_keyword_score(action.summary, ground_truth)
 
-    escalation_component = 0.4 if has_primary_route else 0.0
-    routing_component = 0.3 if has_secondary_route else 0.0
-    urgency_component = 0.3 if urgent_label else 0.0
+    escalation_component = 0.35 if has_primary_route else 0.0
+    routing_component = 0.25 if has_secondary_route else 0.0
+    urgency_component = 0.25 if urgent_label else 0.0
+    summary_component = 0.15 * summary_score
 
-    raw_score = escalation_component + routing_component + urgency_component
+    raw_score = escalation_component + routing_component + urgency_component + summary_component
     if _normalized_text(action.label) == "spam":
         raw_score -= spam_penalty
 
@@ -173,6 +203,7 @@ def grade_hard(action: TriageAction, ground_truth: dict) -> RewardResult:
         "escalation_component": escalation_component,
         "routing_component": routing_component,
         "urgency_component": urgency_component,
+        "summary_component": round(summary_component, 4),
         "spam_penalty": spam_penalty if _normalized_text(action.label) == "spam" else 0.0,
     }
     feedback = "Hard-task weighted policy grading completed."

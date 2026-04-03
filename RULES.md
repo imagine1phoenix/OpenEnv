@@ -46,6 +46,13 @@ These are automated checks. Failing ANY ONE means disqualification.
 | 3 | Dockerfile builds | Runs docker build on the submitted repo - must succeed |
 | 4 | Inference reproduces | Runs inference.py - must complete without error and produce scores |
 | 5 | 3+ tasks with graders | Enumerates tasks, runs each grader, verifies scores in [0.0, 1.0] |
+| 6 | Pre-validation script | Runs `./validate-submission.sh <ping_url> .` and expects all 3 checks to pass |
+
+### 2.1 Mandatory pre-submit validation
+
+- Before claiming "submission ready", run `./validate-submission.sh <ping_url> .` from repo root.
+- If `<ping_url>` is unavailable, request it and block readiness claims until provided.
+- Any AI assistant working on this repo must treat validator failure as a hard stop.
 
 ### Infrastructure constraints
 
@@ -111,6 +118,7 @@ Rules:
 | 8th | Dockerfile | Container build | N/A (config file) |
 | 8th | requirements.txt | Pinned dependencies | N/A (config file) |
 | 9th | README.md | Full documentation | N/A (documentation) |
+| 10th | validate-submission.sh | Pre-submission validator script | N/A (shell script) |
 
 ### Rules about files
 

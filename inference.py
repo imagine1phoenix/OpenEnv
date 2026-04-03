@@ -18,6 +18,14 @@ MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_STEPS = 10
 TEMPERATURE = 0.2
 MAX_TOKENS = 200
+SYSTEM_PROMPT = (
+    "You are an email triage assistant. For every email, follow this order: "
+    "(1) prioritize urgency from risk/time impact, "
+    "(2) categorize using one label: urgent|normal|spam|archive, "
+    "(3) route to the best owner team. "
+    "Summaries must mention the key evidence that drove your decision. "
+    "Return only one JSON object with fields: label, summary, route_to."
+)
 FALLBACK_ACTION = {
     "label": "normal",
     "summary": "Unable to parse response",
@@ -99,12 +107,16 @@ def build_prompt(observation: EmailObservation, history: list[str]) -> str:
     )
 
     return (
-        "You are an email triage assistant. Choose one action with fields: "
-        "label, summary, route_to. Allowed labels are urgent, normal, spam, archive. "
-        "Route using general, billing, safety, support, or engineering when possible.\n\n"
+        "Task objective: prioritize, categorize, and route emails using contextual "
+        "understanding.\n"
+        "Decision policy:\n"
+        "1) Prioritize: check safety, fraud/phishing, production impact, or legal risk.\n"
+        "2) Categorize: choose exactly one label from urgent|normal|spam|archive.\n"
+        "3) Route: choose the most responsible team (general|billing|safety|support|engineering).\n"
+        "4) Summarize: include concrete clues from subject/body/thread that justify your decision.\n\n"
         f"Recent history:\n{recent_history}\n\n"
         f"Current observation:\n{observation_block}\n\n"
-        "Respond with either JSON or a text line containing label, summary, and route_to."
+        "Respond with exactly one JSON object containing label, summary, and route_to."
     )
 
 
@@ -227,10 +239,7 @@ def run_episode(client: OpenAI, model_name: str, task_id: str) -> tuple[float, i
                 messages=[
                     {
                         "role": "system",
-                        "content": (
-                            "You triage professional emails using label, summary, and "
-                            "route_to."
-                        ),
+                        "content": SYSTEM_PROMPT,
                     },
                     {"role": "user", "content": prompt},
                 ],

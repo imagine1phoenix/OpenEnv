@@ -23,6 +23,7 @@ Built to the OpenEnv specification for standardized agent evaluation and benchma
 - [Score Table](#score-table)
 - [Docker Deployment](#docker-deployment)
 - [Hugging Face Space](#hugging-face-space)
+- [Pre-Submission Validation](#pre-submission-validation)
 - [API Reference](#api-reference)
 - [Project Structure](#project-structure)
 - [Known Limitations](#known-limitations)
@@ -280,6 +281,9 @@ Live URL placeholder:
 
 `https://huggingface.co/spaces/YOUR_USERNAME/email-triage-env`
 
+The Space homepage (`/`) now serves a lightweight interactive triage console for
+manual testing. Machine-readable service metadata is available at `GET /meta`.
+
 Example interaction:
 
 ```bash
@@ -289,6 +293,23 @@ curl -X POST "$SPACE_URL/reset" \
   -H "Content-Type: application/json" \
   -d '{"task_id": "task_easy"}'
 ```
+
+---
+
+## Pre-Submission Validation
+
+Run the validator before submitting your environment.
+
+```bash
+chmod +x validate-submission.sh
+./validate-submission.sh https://YOUR_USERNAME-email-triage-env.hf.space .
+```
+
+The script checks:
+
+- HF Space `/reset` health (HTTP 200 expected)
+- Docker build success
+- `openenv validate` pass status
 
 ---
 
@@ -365,6 +386,7 @@ Response: `EnvironmentState` JSON object.
 ├── openenv.yaml
 ├── Dockerfile
 ├── requirements.txt
+├── validate-submission.sh
 ├── README.md
 └── RULES.md
 ```

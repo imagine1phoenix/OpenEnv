@@ -1,4 +1,4 @@
-"""Flask server wrapper for the OpenEnv email triage environment."""
+"""Auxiliary server entrypoint required by OpenEnv local validation checks."""
 
 from flask import Flask, Response, jsonify, request
 
@@ -350,11 +350,7 @@ def root_endpoint():
 
 @app.post("/reset")
 def reset_endpoint():
-    """Reset the environment with a selected task and return ResetResult JSON.
-
-    Returns:
-        Flask response containing reset payload.
-    """
+    """Reset the environment with a selected task and return ResetResult JSON."""
     global current_env
 
     payload = request.get_json(silent=True)
@@ -378,11 +374,7 @@ def reset_endpoint():
 
 @app.post("/step")
 def step_endpoint():
-    """Advance environment by one action and return StepResult JSON.
-
-    Returns:
-        Flask response containing step payload.
-    """
+    """Advance environment by one action and return StepResult JSON."""
     payload = request.get_json(silent=True)
     if payload is None:
         return jsonify({"error": "Malformed JSON payload."}), 400
@@ -393,11 +385,7 @@ def step_endpoint():
 
 @app.post("/state")
 def state_endpoint():
-    """Return read-only EnvironmentState JSON snapshot.
-
-    Returns:
-        Flask response containing state payload.
-    """
+    """Return read-only EnvironmentState JSON snapshot."""
     state_result = current_env.state()
     return jsonify(state_result.model_dump())
 

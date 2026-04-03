@@ -23,6 +23,7 @@ TASK_EASY: dict[str, object] = {
             "label": "normal",
             "route_to": "billing",
             "priority_weight": 1.0,
+            "summary_keywords": ["invoice", "purchase order", "billing portal"],
         }
     ],
 }
@@ -92,26 +93,31 @@ TASK_MEDIUM: dict[str, object] = {
             "label": "spam",
             "route_to": "general",
             "priority_weight": 1.0,
+            "summary_keywords": ["external link", "disable", "phishing"],
         },
         {
             "label": "urgent",
             "route_to": "engineering",
             "priority_weight": 1.5,
+            "summary_keywords": ["checkout", "failures", "on-call"],
         },
         {
             "label": "normal",
             "route_to": "billing",
             "priority_weight": 1.2,
+            "summary_keywords": ["duplicate", "charges", "billing"],
         },
         {
             "label": "urgent",
             "route_to": "safety",
             "priority_weight": 1.6,
+            "summary_keywords": ["smoke", "overheating", "safety"],
         },
         {
             "label": "archive",
             "route_to": "general",
             "priority_weight": 0.8,
+            "summary_keywords": ["all-hands", "agenda", "no action required"],
         },
     ],
 }
@@ -153,12 +159,18 @@ HARD_TASK_GROUND_TRUTH_POOL: list[dict[str, object]] = [
         "route_to": "safety",
         "cc_route": "billing",
         "penalize_spam": 0.2,
+        "summary_keywords": ["unsafe", "overheating", "double charge", "refund"],
     },
     {
         "label": "urgent",
         "route_to": "safety",
         "cc_route": "billing",
         "penalize_spam": 0.2,
+        "summary_keywords": [
+            "compliance",
+            "safety escalation",
+            "refund timeline",
+        ],
     },
 ]
 
