@@ -1,9 +1,10 @@
-"""Inference runner for the OpenEnv email triage environment."""
+"""Inference script for OpenEnv email triage with strict stdout event format."""
 
 import argparse
 import json
 import os
 import re
+import time
 from typing import Any
 
 from openai import OpenAI
@@ -11,21 +12,26 @@ from openai import OpenAI
 from environment import EmailTriageEnv
 from models import EmailObservation, TriageAction
 
-API_BASE_URL = os.getenv("API_BASE_URL")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
+API_KEY = HF_TOKEN or os.getenv("API_KEY")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-MAX_STEPS = 10
+BENCHMARK = "openenv-email-triage"
+MAX_STEPS = 30
 TEMPERATURE = 0.2
 MAX_TOKENS = 200
+SUCCESS_SCORE_THRESHOLD = 0.5
+DEFAULT_RUNTIME_BUDGET_SECONDS = int(os.getenv("INFERENCE_RUNTIME_BUDGET_SECONDS", "1140"))
+DEFAULT_REQUEST_TIMEOUT_SECONDS = float(os.getenv("INFERENCE_REQUEST_TIMEOUT_SECONDS", "12"))
+
 SYSTEM_PROMPT = (
-    "You are an email triage assistant. For every email, follow this order: "
-    "(1) prioritize urgency from risk/time impact, "
-    "(2) categorize using one label: urgent|normal|spam|archive, "
-    "(3) route to the best owner team. "
-    "Summaries must mention the key evidence that drove your decision. "
-    "Return only one JSON object with fields: label, summary, route_to."
+    "You are an email triage assistant. For each email, prioritize risk/time impact, "
+    "categorize with one label (urgent|normal|spam|archive), route to the best team, "
+    "and summarize the key evidence. Return one JSON object with keys label, summary, route_to."
 )
+
 FALLBACK_ACTION = {
     "label": "normal",
     "summary": "Unable to parse response",
@@ -36,65 +42,109 @@ TASK_MAP = {
     "1": "task_easy",
     "2": "task_medium",
     "3": "task_hard",
+    "4": "task_production",
 }
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments.
-
-    Returns:
-        Parsed argparse namespace.
-    """
+    """Parse command-line arguments for task and optional model override."""
     parser = argparse.ArgumentParser(description="Run OpenEnv email triage inference.")
     parser.add_argument(
         "--task",
         default="all",
-        choices=["1", "2", "3", "all"],
-        help="Task selection: 1, 2, 3, or all.",
+        choices=["1", "2", "3", "4", "all"],
+        help="Task selection: 1, 2, 3, 4, or all.",
     )
     parser.add_argument(
         "--model",
         default=None,
         help="Optional model override. Falls back to MODEL_NAME environment variable.",
     )
+    parser.add_argument(
+        "--split",
+        default=os.getenv("OPENENV_EVAL_SPLIT", "public"),
+        choices=["public", "private_eval"],
+        help="Scenario split to evaluate.",
+    )
+    parser.add_argument(
+        "--episodes-per-task",
+        default=1,
+        type=int,
+        help="Number of deterministic scenarios to evaluate per task.",
+    )
+    parser.add_argument(
+        "--runtime-budget-seconds",
+        default=DEFAULT_RUNTIME_BUDGET_SECONDS,
+        type=int,
+        help="Global wall-clock budget for the full script run.",
+    )
+    parser.add_argument(
+        "--request-timeout-seconds",
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        type=float,
+        help="Timeout per LLM request.",
+    )
+    parser.add_argument(
+        "--production-profile",
+        default="standard",
+        choices=["light", "standard", "heavy"],
+        help="Runtime workload profile used for task 4 episodes.",
+    )
+    parser.add_argument(
+        "--business-hours-mode",
+        action="store_true",
+        help="If set, task 4 timestamps focus on business-hours windows.",
+    )
+    parser.add_argument(
+        "--escalation-mode",
+        default="normal",
+        choices=["low", "normal", "high"],
+        help="Escalation strictness for task 4 follow-up generation.",
+    )
     return parser.parse_args()
 
 
 def validate_runtime_config(model_name: str | None) -> str:
-    """Validate required API runtime configuration.
-
-    Args:
-        model_name: Optional model name from CLI override.
-
-    Returns:
-        Effective model name.
-
-    Raises:
-        ValueError: If required runtime settings are missing.
-    """
-    if not API_BASE_URL:
-        raise ValueError("Missing API_BASE_URL environment variable.")
+    """Validate required runtime settings and return effective model name."""
     if not API_KEY:
         raise ValueError("Missing HF_TOKEN or API_KEY environment variable.")
 
     effective_model = model_name or MODEL_NAME
-    if not effective_model:
-        raise ValueError("Missing MODEL_NAME environment variable or --model override.")
     return effective_model
 
 
-def build_prompt(observation: EmailObservation, history: list[str]) -> str:
-    """Build model prompt from current observation and recent history.
+def log_start(task_name: str, benchmark_name: str, model_name: str) -> None:
+    """Emit mandatory START line."""
+    print(
+        f"[START] task={task_name} env={benchmark_name} model={model_name}",
+        flush=True,
+    )
 
-    Args:
-        observation: Current observation payload.
-        history: Episode history lines.
 
-    Returns:
-        Prompt string for inference.
-    """
+def log_step(step: int, action_str: str, reward: float, done: bool, error: str | None) -> None:
+    """Emit mandatory STEP line."""
+    error_value = error if error else "null"
+    done_value = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action_str} reward={reward:.2f} "
+        f"done={done_value} error={error_value}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, rewards: list[float]) -> None:
+    """Emit mandatory END line."""
+    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+def build_user_prompt(observation: EmailObservation, history: list[str]) -> str:
+    """Build model prompt from current observation and recent history."""
     recent_history = "\n".join(history[-5:]) if history else "None"
-    observation_block = (
+    return (
         f"email_id: {observation.email_id}\n"
         f"subject: {observation.subject}\n"
         f"sender: {observation.sender}\n"
@@ -103,32 +153,14 @@ def build_prompt(observation: EmailObservation, history: list[str]) -> str:
         f"thread_history: {observation.thread_history}\n"
         f"task_id: {observation.task_id}\n"
         f"step_number: {observation.step_number}\n"
-        f"total_emails: {observation.total_emails}"
-    )
-
-    return (
-        "Task objective: prioritize, categorize, and route emails using contextual "
-        "understanding.\n"
-        "Decision policy:\n"
-        "1) Prioritize: check safety, fraud/phishing, production impact, or legal risk.\n"
-        "2) Categorize: choose exactly one label from urgent|normal|spam|archive.\n"
-        "3) Route: choose the most responsible team (general|billing|safety|support|engineering).\n"
-        "4) Summarize: include concrete clues from subject/body/thread that justify your decision.\n\n"
-        f"Recent history:\n{recent_history}\n\n"
-        f"Current observation:\n{observation_block}\n\n"
-        "Respond with exactly one JSON object containing label, summary, and route_to."
+        f"total_emails: {observation.total_emails}\n\n"
+        f"recent_history:\n{recent_history}\n\n"
+        "Return exactly one JSON object with label, summary, route_to."
     )
 
 
 def strip_action_prefixes(response_text: str) -> str:
-    """Remove common textual prefixes from model output before parsing.
-
-    Args:
-        response_text: Raw model output.
-
-    Returns:
-        Cleaned model output.
-    """
+    """Remove common formatting wrappers before parsing model output."""
     cleaned = response_text.strip()
     cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"```$", "", cleaned).strip()
@@ -137,14 +169,7 @@ def strip_action_prefixes(response_text: str) -> str:
 
 
 def parse_text_action(cleaned_text: str) -> dict[str, str]:
-    """Parse action from free-form text using regex patterns.
-
-    Args:
-        cleaned_text: Normalized model text.
-
-    Returns:
-        Parsed action dict fields when available.
-    """
+    """Parse action from free-form text with deterministic regex fallback."""
     result: dict[str, str] = {}
 
     label_match = re.search(
@@ -175,14 +200,7 @@ def parse_text_action(cleaned_text: str) -> dict[str, str]:
 
 
 def parse_action_response(response_text: str) -> TriageAction:
-    """Parse a model response into a TriageAction with deterministic fallback.
-
-    Args:
-        response_text: Raw model response content.
-
-    Returns:
-        Parsed TriageAction or fallback action.
-    """
+    """Parse model response into a valid TriageAction with fallback behavior."""
     cleaned_text = strip_action_prefixes(response_text)
     parsed_payload: dict[str, Any] = {}
 
@@ -209,93 +227,124 @@ def parse_action_response(response_text: str) -> TriageAction:
         return TriageAction.model_validate(FALLBACK_ACTION)
 
 
-def run_episode(client: OpenAI, model_name: str, task_id: str) -> tuple[float, int]:
-    """Run one task episode and return score and step count.
+def action_to_log_string(action: TriageAction) -> str:
+    """Return single-line action string for required STEP logging."""
+    return json.dumps(action.model_dump(), separators=(",", ":"), ensure_ascii=True)
 
-    Args:
-        client: OpenAI client instance.
-        model_name: Model identifier.
-        task_id: Task identifier to run.
 
-    Returns:
-        Tuple of (episode_score, steps_taken).
-    """
-    env = EmailTriageEnv(task_id=task_id)
-    reset_result = env.reset()
-    observation = reset_result.observation
-
-    print(f"Episode: {task_id}")
-
-    history: list[str] = []
-    total_reward = 0.0
+def run_episode(
+    client: OpenAI,
+    model_name: str,
+    task_id: str,
+    scenario_index: int,
+    eval_split: str,
+    deadline: float,
+    request_timeout_seconds: float,
+    runtime_options: dict[str, Any] | None = None,
+) -> None:
+    """Run one episode and emit strict START/STEP/END lines."""
+    rewards: list[float] = []
     steps_taken = 0
+    success = False
+    env: EmailTriageEnv | None = None
 
-    for step in range(1, MAX_STEPS + 1):
-        prompt = build_prompt(observation, history)
+    log_start(task_name=task_id, benchmark_name=BENCHMARK, model_name=model_name)
 
-        try:
-            completion = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT,
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-                stream=False,
-            )
-            response_text = completion.choices[0].message.content or ""
-        except Exception as exc:
-            print(f"Model request failed ({exc}). Using fallback action.")
+    try:
+        env = EmailTriageEnv(
+            task_id=task_id,
+            scenario_index=scenario_index,
+            split=eval_split,
+            runtime_options=runtime_options,
+        )
+        reset_result = env.reset()
+        observation = reset_result.observation
+        history: list[str] = []
+
+        for step in range(1, MAX_STEPS + 1):
+            if time.monotonic() >= deadline:
+                break
+
+            prompt = build_user_prompt(observation, history)
+
             response_text = ""
+            try:
+                remaining = max(1.0, deadline - time.monotonic())
+                timeout_seconds = max(
+                    1.0,
+                    min(float(request_timeout_seconds), float(remaining)),
+                )
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                    stream=False,
+                    timeout=timeout_seconds,
+                )
+                response_text = completion.choices[0].message.content or ""
+            except Exception:
+                response_text = ""
 
-        action = parse_action_response(response_text)
-        step_result = env.step(action)
+            action = parse_action_response(response_text)
+            step_result = env.step(action)
 
-        steps_taken = step
-        total_reward += step_result.reward
+            reward = float(step_result.reward)
+            done = bool(step_result.done)
+            error_raw = step_result.info.get("validation_error")
+            error = str(error_raw) if isinstance(error_raw, str) else None
 
-        action_text = f"label={action.label}, route={action.route_to}"
-        history_line = f"Step {step}: {action_text} -> reward {step_result.reward:+.2f}"
-        history.append(history_line)
-        print(history_line)
+            rewards.append(reward)
+            steps_taken = step
 
-        observation = step_result.observation
-        if step_result.done:
-            break
+            log_step(
+                step=step,
+                action_str=action_to_log_string(action),
+                reward=reward,
+                done=done,
+                error=error,
+            )
 
-    episode_score = total_reward / max(steps_taken, 1)
-    print(f"Final score: {episode_score:.2f}\n")
-    return episode_score, steps_taken
+            history.append(
+                f"step={step} action={action.label}/{action.route_to} reward={reward:.2f}"
+            )
+            observation = step_result.observation
 
+            if done:
+                break
 
-def print_score_table(results: list[tuple[str, float, int]]) -> None:
-    """Print a deterministic score table.
+        avg_reward = sum(rewards) / max(len(rewards), 1)
+        success = avg_reward >= SUCCESS_SCORE_THRESHOLD
+    except Exception:
+        success = False
+    finally:
+        if env is not None:
+            close_method = getattr(env, "close", None)
+            if callable(close_method):
+                try:
+                    close_method()
+                except Exception:
+                    pass
 
-    Args:
-        results: List of tuples (task_id, score, steps).
-    """
-    print("=== SCORE TABLE ===")
-    print("Task         Score    Steps")
-    for task_id, score, steps in results:
-        print(f"{task_id:<12} {score:>5.2f}    {steps}")
-
-    mean_score = sum(score for _, score, _ in results) / len(results) if results else 0.0
-    print(f"Mean         {mean_score:>5.2f}")
+        log_end(success=success, steps=steps_taken, rewards=rewards)
 
 
 def main() -> None:
-    """Entrypoint for running inference across selected tasks."""
+    """Entrypoint for running one or many tasks with strict stdout logs."""
     args = parse_args()
+    deadline = time.monotonic() + max(args.runtime_budget_seconds, 1)
+    request_timeout_seconds = max(float(args.request_timeout_seconds), 1.0)
 
     try:
         effective_model = validate_runtime_config(args.model)
     except ValueError as error:
-        print(str(error))
+        print(str(error), flush=True)
         raise SystemExit(1) from error
+
+    _ = LOCAL_IMAGE_NAME
 
     client = OpenAI(
         base_url=API_BASE_URL,
@@ -303,13 +352,25 @@ def main() -> None:
     )
 
     task_ids = [TASK_MAP[args.task]] if args.task in TASK_MAP else list(TASK_MAP.values())
-
-    score_rows: list[tuple[str, float, int]] = []
     for task_id in task_ids:
-        score, steps = run_episode(client, effective_model, task_id)
-        score_rows.append((task_id, score, steps))
-
-    print_score_table(score_rows)
+        runtime_options = None
+        if task_id == "task_production":
+            runtime_options = {
+                "production_profile": args.production_profile,
+                "business_hours_mode": args.business_hours_mode,
+                "escalation_mode": args.escalation_mode,
+            }
+        for scenario_index in range(max(args.episodes_per_task, 1)):
+            run_episode(
+                client=client,
+                model_name=effective_model,
+                task_id=task_id,
+                scenario_index=scenario_index,
+                eval_split=args.split,
+                deadline=deadline,
+                request_timeout_seconds=request_timeout_seconds,
+                runtime_options=runtime_options,
+            )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ tasks:
   - task_easy
   - task_medium
   - task_hard
+  - task_production
 observation_space:
   email_id: str
   subject: str

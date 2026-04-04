@@ -1,10 +1,11 @@
 """Core OpenEnv email triage environment implementation."""
 
+import os
 from typing import cast
 
 from pydantic import ValidationError
 
-from graders import grade_easy, grade_hard, grade_medium
+from graders import grade_easy, grade_hard, grade_medium_step
 from models import (
     EmailObservation,
     EnvironmentState,
@@ -19,14 +20,32 @@ from tasks import get_task_definition
 class EmailTriageEnv:
     """Deterministic email triage environment implementing reset, step, and state."""
 
-    def __init__(self, task_id: str) -> None:
+    def __init__(
+        self,
+        task_id: str,
+        scenario_index: int = 0,
+        split: str | None = None,
+        runtime_options: dict[str, object] | None = None,
+    ) -> None:
         """Initialize environment with a selected task.
 
         Args:
             task_id: Task identifier such as task_easy, task_medium, or task_hard.
+            scenario_index: Deterministic scenario index within the task pool.
+            split: Scenario split, either public or private_eval.
+            runtime_options: Optional deterministic runtime controls for task generation.
         """
         self.task_id = task_id
-        self._task_definition = get_task_definition(task_id)
+        self._episode_index = max(0, scenario_index)
+        self.split = split or os.getenv("OPENENV_EVAL_SPLIT", "public")
+        self.runtime_options = runtime_options or {}
+        self._task_definition = get_task_definition(
+            task_id,
+            self._episode_index,
+            self.split,
+            self.runtime_options,
+        )
+        self._scenario_id = str(self._task_definition.get("scenario_id", "unknown"))
         self._emails = cast(list[dict[str, object]], self._task_definition.get("emails", []))
         self._ground_truth = cast(
             list[dict[str, object]], self._task_definition.get("ground_truth", [])
@@ -35,10 +54,14 @@ class EmailTriageEnv:
         self._current_index = 0
         self._current_step = 0
         self._done = False
-        self._max_steps = 10
+        self._max_steps = max(10, len(self._emails) + 5)
         self._action_history: list[TriageAction] = []
         self._reward_history: list[float] = []
         self._base_score_history: list[float] = []
+        self._generated_followups = 0
+        self._max_generated_followups = 4
+        self._followup_quality_threshold = 0.7
+        self._configure_runtime_controls()
 
     def reset(self) -> ResetResult:
         """Reset episode state and return the first observation.
@@ -46,7 +69,13 @@ class EmailTriageEnv:
         Returns:
             ResetResult containing first observation and metadata.
         """
-        self._task_definition = get_task_definition(self.task_id)
+        self._task_definition = get_task_definition(
+            self.task_id,
+            self._episode_index,
+            self.split,
+            self.runtime_options,
+        )
+        self._scenario_id = str(self._task_definition.get("scenario_id", "unknown"))
         self._emails = cast(list[dict[str, object]], self._task_definition.get("emails", []))
         self._ground_truth = cast(
             list[dict[str, object]], self._task_definition.get("ground_truth", [])
@@ -55,16 +84,24 @@ class EmailTriageEnv:
         self._current_index = 0
         self._current_step = 0
         self._done = False
+        self._max_steps = max(10, len(self._emails) + 5)
         self._action_history = []
         self._reward_history = []
         self._base_score_history = []
+        self._generated_followups = 0
+        self._configure_runtime_controls()
+        self._episode_index += 1
 
         first_observation = self._build_observation(self._current_index)
         return ResetResult(
             observation=first_observation,
             info={
                 "task_id": self.task_id,
+                "scenario_id": self._scenario_id,
+                "split": self.split,
                 "step": self._current_step,
+                "emails_total": len(self._emails),
+                "task_description": str(self._task_definition.get("description", "")),
             },
         )
 
@@ -84,6 +121,8 @@ class EmailTriageEnv:
                 done=True,
                 info={
                     "task_id": self.task_id,
+                    "scenario_id": self._scenario_id,
+                    "split": self.split,
                     "step": self._current_step,
                     "already_done": True,
                 },
@@ -101,13 +140,27 @@ class EmailTriageEnv:
                 done=self._done,
                 info={
                     "task_id": self.task_id,
+                    "scenario_id": self._scenario_id,
+                    "split": self.split,
                     "step": self._current_step,
+                    "emails_total": len(self._emails),
+                    "emails_processed": self._current_index,
+                    "emails_remaining": max(len(self._emails) - self._current_index, 0),
                     "validation_error": str(validation_error),
                 },
             )
 
         base_result = self._grade_current_step(validated_action)
         base_score = base_result.score
+        previous_base_score = self._base_score_history[-1] if self._base_score_history else None
+        progress_signal = self._compute_progress_signal(base_score, previous_base_score)
+
+        truth_for_step = (
+            self._ground_truth[min(self._current_index, len(self._ground_truth) - 1)]
+            if self._ground_truth
+            else {}
+        )
+        self._maybe_enqueue_follow_up(validated_action, truth_for_step, base_score)
 
         self._action_history.append(validated_action)
         self._base_score_history.append(base_score)
@@ -115,8 +168,9 @@ class EmailTriageEnv:
 
         penalties = self._compute_penalties(validated_action)
         trajectory_bonus = self._compute_trajectory_bonus()
+        step_cost = self._compute_step_cost()
         final_reward = self._clip_reward(
-            base_score - (self._current_step * 0.01) + trajectory_bonus - penalties
+            base_score + progress_signal + trajectory_bonus - penalties - step_cost
         )
 
         self._reward_history.append(final_reward)
@@ -135,17 +189,96 @@ class EmailTriageEnv:
 
         info = {
             "task_id": self.task_id,
+            "scenario_id": self._scenario_id,
+            "split": self.split,
             "step": self._current_step,
+            "emails_total": len(self._emails),
+            "emails_processed": min(self._current_index, len(self._emails)),
+            "emails_remaining": max(len(self._emails) - self._current_index, 0),
             "base_score": round(base_score, 4),
+            "progress_signal": round(progress_signal, 4),
+            "step_cost": round(step_cost, 4),
             "penalties": round(penalties, 4),
             "trajectory_bonus": round(trajectory_bonus, 4),
+            "grading_feedback": base_result.feedback,
         }
+        for breakdown_key, breakdown_value in base_result.breakdown.items():
+            if isinstance(breakdown_value, (int, float)):
+                info[f"grade_{breakdown_key}"] = round(float(breakdown_value), 4)
+
         return StepResult(
             observation=next_observation,
             reward=final_reward,
             done=self._done,
             info=info,
         )
+
+    def _maybe_enqueue_follow_up(
+        self,
+        action: TriageAction,
+        truth: dict[str, object],
+        base_score: float,
+    ) -> None:
+        """Insert deterministic escalation follow-up emails for production mode."""
+        if self.task_id != "task_production":
+            return
+        if self._generated_followups >= self._max_generated_followups:
+            return
+        if not self._emails:
+            return
+
+        expected_label = str(truth.get("label", ""))
+        expected_route = str(truth.get("route_to", "general"))
+        is_missed_critical = (
+            expected_label == "urgent"
+            and (action.label != "urgent" or expected_route not in action.route_to.lower())
+        )
+        if not is_missed_critical and base_score >= self._followup_quality_threshold:
+            return
+
+        source_email = self._emails[min(self._current_index, len(self._emails) - 1)]
+        source_subject = str(source_email.get("subject", "Inbox incident"))
+        source_timestamp = str(source_email.get("timestamp", "2026-04-03T00:00:00Z"))
+
+        followup_email = {
+            "email_id": f"followup-{self._scenario_id}-{self._generated_followups + 1}",
+            "subject": f"Escalation follow-up: {source_subject}",
+            "body": (
+                "Automated escalation triggered because prior triage appears incomplete. "
+                "Please route to the responsible team and provide a clear summary now."
+            ),
+            "sender": "incident-control@acme-enterprise.com",
+            "timestamp": source_timestamp,
+            "thread_history": [f"Previous message subject: {source_subject}"],
+        }
+        followup_truth = {
+            "label": "urgent",
+            "route_to": expected_route,
+            "priority_weight": min(max(float(truth.get("priority_weight", 1.5)) + 0.2, 1.5), 2.0),
+            "summary_keywords": ["escalation", "follow-up", expected_route],
+        }
+
+        insert_at = min(self._current_index + 1, len(self._emails))
+        self._emails.insert(insert_at, followup_email)
+        self._ground_truth.insert(insert_at, followup_truth)
+        self._generated_followups += 1
+
+    def _configure_runtime_controls(self) -> None:
+        """Apply deterministic runtime control options for production simulator."""
+        if self.task_id != "task_production":
+            self._max_generated_followups = 4
+            self._followup_quality_threshold = 0.7
+            return
+
+        escalation_mode = str(self.runtime_options.get("escalation_mode", "normal")).lower()
+        escalation_map = {
+            "low": (2, 0.55),
+            "normal": (4, 0.7),
+            "high": (8, 0.85),
+        }
+        max_followups, threshold = escalation_map.get(escalation_mode, escalation_map["normal"])
+        self._max_generated_followups = max_followups
+        self._followup_quality_threshold = threshold
 
     def state(self) -> EnvironmentState:
         """Return read-only snapshot of full internal state.
@@ -228,9 +361,8 @@ class EmailTriageEnv:
             return grade_easy(action, truth)
 
         if self.task_id == "task_medium":
-            actions_so_far = self._action_history + [action]
-            truths_so_far = self._ground_truth[: len(actions_so_far)]
-            return grade_medium(actions_so_far, truths_so_far)
+            truth = self._ground_truth[min(self._current_index, len(self._ground_truth) - 1)]
+            return grade_medium_step(action, truth)
 
         truth = self._ground_truth[min(self._current_index, len(self._ground_truth) - 1)]
         return grade_hard(action, truth)
@@ -254,6 +386,38 @@ class EmailTriageEnv:
             penalty_total += 0.3
 
         return penalty_total
+
+    def _compute_progress_signal(
+        self,
+        base_score: float,
+        previous_base_score: float | None,
+    ) -> float:
+        """Compute dense partial-progress reward independent of final completion.
+
+        Args:
+            base_score: Current-step base grade in [0.0, 1.0].
+            previous_base_score: Previous step base grade when available.
+
+        Returns:
+            Small positive/negative signal reflecting progress and quality trend.
+        """
+        total_emails = max(len(self._emails), 1)
+        progress_ratio = min(1.0, (self._current_index + 1) / total_emails)
+
+        completion_signal = 0.05 * progress_ratio
+        quality_signal = 0.05 * self._clip_reward(base_score)
+
+        trend_signal = 0.0
+        if previous_base_score is not None:
+            delta = base_score - previous_base_score
+            trend_signal = max(-0.02, min(0.03, delta * 0.1))
+
+        return completion_signal + quality_signal + trend_signal
+
+    def _compute_step_cost(self) -> float:
+        """Return a gentle efficiency cost that grows with episode length."""
+        normalized_step = self._current_step / max(self._max_steps, 1)
+        return 0.005 + (0.01 * normalized_step)
 
     def _compute_trajectory_bonus(self) -> float:
         """Return trajectory bonus when episode completion quality is high.

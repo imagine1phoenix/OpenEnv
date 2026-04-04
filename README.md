@@ -1,3 +1,13 @@
+---
+title: OpenEnv Email Triage Environment
+emoji: 📬
+colorFrom: blue
+colorTo: cyan
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # OpenEnv Email Triage Environment
 
 A real-world AI agent training environment that simulates professional email triage.
@@ -105,6 +115,30 @@ What the agent must output at each step:
 
 ## Tasks
 
+Each task now contains multiple deterministic scenario variants. By default, `/reset`
+cycles through the public scenario pool for the selected task.
+
+Private evaluation split selection is controlled server-side via environment
+configuration (`OPENENV_EVAL_SPLIT`), and client-side override can be disabled
+to preserve benchmark integrity.
+
+To keep private evaluation data out of source control, supply hidden scenarios at
+runtime using `OPENENV_PRIVATE_SCENARIOS_JSON` (JSON object keyed by task id).
+
+Example deployment configuration:
+
+```bash
+export OPENENV_EVAL_SPLIT="private_eval"
+export OPENENV_ALLOW_CLIENT_EVAL_OVERRIDE="false"
+export OPENENV_PRIVATE_SCENARIOS_JSON='{"task_easy":[{"scenario_id":"easy-private-001","emails":[{"email_id":"easy-p-001","subject":"Private billing exception","body":"Please correct invoice mismatch for contract addendum B-7 before end of day.","sender":"contracts@partner.example","timestamp":"2026-04-03T09:00:00Z","thread_history":["Customer requested corrected invoice reference."]}],"ground_truth":[{"label":"normal","route_to":"billing","priority_weight":1.0,"summary_keywords":["invoice mismatch","contract addendum","correct"]}]}],"task_medium":[],"task_hard":[]}'
+```
+
+Notes:
+
+- Keep this value in deployment secrets or runtime environment config.
+- Use valid JSON with double quotes only.
+- You can provide multiple scenarios per task by adding more objects to each task list.
+
 ### Task 1 — Easy (`task_easy`)
 
 Objective: Correctly classify a single unambiguous email.
@@ -138,6 +172,22 @@ Scoring:
 - Penalty: -0.2 if marked as spam
 - Final score = weighted sum of sub-scores (clipped to 0.0 minimum)
 
+### Task 4 — Production (`task_production`)
+
+Objective: Simulate a production inbox with mixed operational load across safety,
+engineering, billing, support, spam, and low-priority traffic.
+
+Scoring:
+
+- Per-email weighted scoring by business priority
+- Route-noise penalty when actions route to too many teams
+- Summary quality based on contextual evidence keywords and anti-stuffing rules
+- Deterministic escalation follow-ups are inserted when critical triage is missed
+- Runtime controls available via `/reset` payload for production simulations:
+  - `production_profile`: `light` | `standard` | `heavy`
+  - `business_hours_mode`: `true` | `false`
+  - `escalation_mode`: `low` | `normal` | `high`
+
 ---
 
 ## Reward Function
@@ -147,7 +197,7 @@ The reward function provides dense training signal at every step, not just binar
 ### Formula
 
 ```text
-final_reward = base_score - (step_count * 0.01) + trajectory_bonus - penalties
+final_reward = base_score + progress_signal + trajectory_bonus - penalties - step_cost
 ```
 
 ### Components
@@ -155,9 +205,10 @@ final_reward = base_score - (step_count * 0.01) + trajectory_bonus - penalties
 | Component | Value | Condition |
 |---|---|---|
 | Base score | 0.0-1.0 | Raw grader score for the current step |
-| Step penalty | -0.01 per step | Encourages efficiency |
+| Progress signal | ~0.00 to ~0.13 | Partial credit for advancing queue, quality, and positive trend |
+| Step cost | ~-0.005 to ~-0.015 | Gentle efficiency pressure over longer episodes |
 | Trajectory bonus | +0.2 | If all tasks completed with mean score > 0.8 |
-| Destructive action penalty | -0.5 | Agent archives or deletes without reading |
+| Archive quality penalty | -0.5 | Archive action with an underspecified summary |
 | Loop detection penalty | -0.3 | Same action repeated 3+ times consecutively |
 
 The final reward is clipped to [-1.0, 1.0] before being returned.
@@ -203,6 +254,7 @@ curl -X POST http://localhost:7860/state
 ```bash
 python inference.py --task all
 python inference.py --task 1
+python inference.py --task 4 --production-profile heavy --business-hours-mode --escalation-mode high
 ```
 
 The script reads API settings from environment variables and uses fallback actions when
@@ -232,7 +284,15 @@ The inference script (inference.py) follows this loop:
 export API_BASE_URL="https://router.huggingface.co/v1"
 export MODEL_NAME="gpt-4o"
 export HF_TOKEN="your-token-here"
+export INFERENCE_RUNTIME_BUDGET_SECONDS="1140"
+export INFERENCE_REQUEST_TIMEOUT_SECONDS="12"
 ```
+
+Runtime controls:
+
+- `INFERENCE_RUNTIME_BUDGET_SECONDS` limits full-script wall-clock runtime (default 1140s, under 20 minutes).
+- `INFERENCE_REQUEST_TIMEOUT_SECONDS` limits each LLM request timeout (default 12s).
+- Equivalent CLI flags: `--runtime-budget-seconds` and `--request-timeout-seconds`.
 
 Fallback behavior when parsing fails:
 
@@ -382,10 +442,14 @@ Response: `EnvironmentState` JSON object.
 ├── graders.py
 ├── environment.py
 ├── server.py
+├── server/
+│   └── app.py
 ├── inference.py
 ├── openenv.yaml
 ├── Dockerfile
 ├── requirements.txt
+├── pyproject.toml
+├── uv.lock
 ├── validate-submission.sh
 ├── README.md
 └── RULES.md
@@ -397,14 +461,14 @@ Response: `EnvironmentState` JSON object.
 
 | Limitation | Impact |
 |---|---|
-| Static email data | No dynamic email generation |
+| Static scenario pools | No live inbox ingestion from production systems |
 | Single-agent server instance | Concurrent agents can conflict |
 | No live thread simulation | Thread history is static |
 | English-only content | No multilingual coverage |
 | No attachments | Text-only triage |
 | Simplified routing | No org chart or availability modeling |
-| No temporal dynamics | Queue is fixed at reset |
-| String-matching grader edges | Equivalent routes may not always get credit |
+| Limited temporal dynamics | Production task can generate deterministic escalations, but not full live message streams |
+| Rule-based grading edges | Equivalent decisions may score differently from humans |
 
 What an agent cannot exploit:
 
