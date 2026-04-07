@@ -12,9 +12,11 @@ ROUTE_ALIAS_MAP = {
     "general": ["general", "inbox", "operations"],
 }
 
+SCORE_EPSILON = 1e-6
+
 
 def _clip_score(score_value: float) -> float:
-    """Clip a score to the inclusive range [0.0, 1.0].
+    """Clip a score to the strict range (0.0, 1.0).
 
     Args:
         score_value: Raw score.
@@ -22,7 +24,12 @@ def _clip_score(score_value: float) -> float:
     Returns:
         Clipped score.
     """
-    return max(0.0, min(1.0, score_value))
+    clipped = max(0.0, min(1.0, score_value))
+    if clipped <= 0.0:
+        return SCORE_EPSILON
+    if clipped >= 1.0:
+        return 1.0 - SCORE_EPSILON
+    return clipped
 
 
 def _normalized_text(text_value: str) -> str:
@@ -210,8 +217,8 @@ def grade_medium(actions: list[TriageAction], ground_truths: list[dict]) -> Rewa
     comparable_count = min(len(actions), len(ground_truths))
     if comparable_count == 0:
         return RewardResult(
-            score=0.0,
-            breakdown={"emails_scored": 0.0, "weighted_average": 0.0},
+            score=SCORE_EPSILON,
+            breakdown={"emails_scored": 0.0, "weighted_average": SCORE_EPSILON},
             feedback="No actions available for grading.",
         )
 
