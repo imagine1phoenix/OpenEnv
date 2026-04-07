@@ -23,6 +23,7 @@ MAX_STEPS = 30
 TEMPERATURE = 0.2
 MAX_TOKENS = 200
 SUCCESS_SCORE_THRESHOLD = 0.5
+LOG_SCORE_EPSILON = 1e-6
 DEFAULT_RUNTIME_BUDGET_SECONDS = int(os.getenv("INFERENCE_RUNTIME_BUDGET_SECONDS", "1140"))
 DEFAULT_REQUEST_TIMEOUT_SECONDS = float(os.getenv("INFERENCE_REQUEST_TIMEOUT_SECONDS", "12"))
 
@@ -121,12 +122,18 @@ def log_start(task_name: str, benchmark_name: str, model_name: str) -> None:
     )
 
 
+def _format_open_score(value: float) -> str:
+    """Format scores without collapsing strict-open values to 0.00 or 1.00."""
+    clamped = max(LOG_SCORE_EPSILON, min(1.0 - LOG_SCORE_EPSILON, float(value)))
+    return f"{clamped:.6f}"
+
+
 def log_step(step: int, action_str: str, reward: float, done: bool, error: str | None) -> None:
     """Emit mandatory STEP line."""
     error_value = error if error else "null"
     done_value = str(done).lower()
     print(
-        f"[STEP] step={step} action={action_str} reward={reward:.2f} "
+        f"[STEP] step={step} action={action_str} reward={_format_open_score(reward)} "
         f"done={done_value} error={error_value}",
         flush=True,
     )
@@ -134,7 +141,7 @@ def log_step(step: int, action_str: str, reward: float, done: bool, error: str |
 
 def log_end(success: bool, steps: int, rewards: list[float]) -> None:
     """Emit mandatory END line."""
-    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
+    rewards_str = ",".join(_format_open_score(reward) for reward in rewards)
     print(
         f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
@@ -309,7 +316,7 @@ def run_episode(
             )
 
             history.append(
-                f"step={step} action={action.label}/{action.route_to} reward={reward:.2f}"
+                f"step={step} action={action.label}/{action.route_to} reward={_format_open_score(reward)}"
             )
             observation = step_result.observation
 

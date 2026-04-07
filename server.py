@@ -428,10 +428,10 @@ FRONTEND_HTML = """<!doctype html>
             }
 
             const rewardValue = safeNumber(data.reward);
-            insightRewardEl.textContent = rewardValue !== null ? rewardValue.toFixed(2) : '-';
+            insightRewardEl.textContent = rewardValue !== null ? rewardValue.toFixed(6) : '-';
 
             const baseScoreValue = safeNumber(info.base_score);
-            insightBaseEl.textContent = baseScoreValue !== null ? baseScoreValue.toFixed(2) : '-';
+            insightBaseEl.textContent = baseScoreValue !== null ? baseScoreValue.toFixed(6) : '-';
 
             const tips = [];
             if (info.validation_error) {

@@ -20,6 +20,11 @@ def _strict_binary_score(is_positive_case: bool) -> float:
     return 1.0 - SCORE_EPSILON if is_positive_case else SCORE_EPSILON
 
 
+def _strict_ratio_score(raw_value: float) -> float:
+    """Return strict in-range score for ratio-like metrics."""
+    return _clip_score(raw_value)
+
+
 def _clip_score(score_value: float) -> float:
     """Clip a score to the strict range (0.0, 1.0).
 
@@ -169,10 +174,10 @@ def grade_easy(action: TriageAction, ground_truth: dict) -> RewardResult:
 
     score_value = _clip_score(score_value)
     breakdown = {
-        "label_match": 1.0 if label_correct else 0.0,
-        "route_match": 1.0 if route_correct else 0.0,
-        "summary_match": round(summary_score, 4),
-        "route_noise_penalty": round(noise_penalty, 4),
+        "label_match": _strict_binary_score(label_correct),
+        "route_match": _strict_binary_score(route_correct),
+        "summary_match": _strict_ratio_score(summary_score),
+        "route_noise_penalty": _strict_ratio_score(noise_penalty),
     }
     feedback = "Easy-task grading completed with context summary scoring."
     return RewardResult(score=score_value, breakdown=breakdown, feedback=feedback)
@@ -199,11 +204,11 @@ def grade_medium_step(action: TriageAction, truth: dict) -> RewardResult:
     return RewardResult(
         score=weighted_step_score,
         breakdown={
-            "label_match": 1.0 if label_correct else 0.0,
-            "route_match": 1.0 if route_correct else 0.0,
-            "summary_match": round(summary_score, 4),
-            "priority_weight": round(priority_weight, 4),
-            "route_noise_penalty": round(noise_penalty, 4),
+            "label_match": _strict_binary_score(label_correct),
+            "route_match": _strict_binary_score(route_correct),
+            "summary_match": _strict_ratio_score(summary_score),
+            "priority_weight": _strict_ratio_score(min(priority_weight / 2.0, 1.0)),
+            "route_noise_penalty": _strict_ratio_score(noise_penalty),
         },
         feedback="Medium-task step grading completed.",
     )
@@ -223,7 +228,7 @@ def grade_medium(actions: list[TriageAction], ground_truths: list[dict]) -> Rewa
     if comparable_count == 0:
         return RewardResult(
             score=SCORE_EPSILON,
-            breakdown={"emails_scored": 0.0, "weighted_average": SCORE_EPSILON},
+            breakdown={"emails_scored": SCORE_EPSILON, "weighted_average": SCORE_EPSILON},
             feedback="No actions available for grading.",
         )
 
@@ -239,24 +244,28 @@ def grade_medium(actions: list[TriageAction], ground_truths: list[dict]) -> Rewa
         truth = ground_truths[index]
 
         step_result = grade_medium_step(action, truth)
-        priority_weight = float(step_result.breakdown.get("priority_weight", 1.0))
+        priority_weight = max(float(truth.get("priority_weight", 1.0)), 0.1)
         weighted_score_sum += step_result.score
         weight_sum += min(priority_weight, 2.0)
 
-        label_hits += 1 if step_result.breakdown.get("label_match", 0.0) > 0 else 0
-        route_hits += 1 if step_result.breakdown.get("route_match", 0.0) > 0 else 0
-        summary_total += float(step_result.breakdown.get("summary_match", 0.0))
-        noise_penalty_total += float(step_result.breakdown.get("route_noise_penalty", 0.0))
+        expected_label = _normalized_text(str(truth.get("label", "")))
+        expected_route = _normalized_text(str(truth.get("route_to", "")))
+        label_hits += 1 if _normalized_text(action.label) == expected_label else 0
+        route_hits += 1 if _route_matches(action.route_to, expected_route) else 0
+        summary_total += float(step_result.breakdown.get("summary_match", SCORE_EPSILON))
+        noise_penalty_total += float(
+            step_result.breakdown.get("route_noise_penalty", SCORE_EPSILON)
+        )
 
     weighted_average = weighted_score_sum / weight_sum if weight_sum > 0.0 else 0.0
     score_value = _clip_score(weighted_average)
 
     breakdown = {
-        "emails_scored": float(comparable_count),
-        "label_accuracy": label_hits / comparable_count,
-        "route_accuracy": route_hits / comparable_count,
-        "summary_accuracy": summary_total / comparable_count,
-        "avg_route_noise_penalty": noise_penalty_total / comparable_count,
+        "emails_scored": _strict_ratio_score(float(comparable_count) / (comparable_count + 1.0)),
+        "label_accuracy": _strict_ratio_score(label_hits / comparable_count),
+        "route_accuracy": _strict_ratio_score(route_hits / comparable_count),
+        "summary_accuracy": _strict_ratio_score(summary_total / comparable_count),
+        "avg_route_noise_penalty": _strict_ratio_score(noise_penalty_total / comparable_count),
         "weighted_average": score_value,
     }
     feedback = "Weighted medium-task grading completed."
@@ -297,12 +306,14 @@ def grade_hard(action: TriageAction, ground_truth: dict) -> RewardResult:
 
     score_value = _clip_score(raw_score)
     breakdown = {
-        "escalation_component": escalation_component,
-        "routing_component": routing_component,
-        "urgency_component": urgency_component,
-        "summary_component": round(summary_component, 4),
-        "route_noise_penalty": round(noise_penalty, 4),
-        "spam_penalty": spam_penalty if _normalized_text(action.label) == "spam" else 0.0,
+        "escalation_component": _strict_ratio_score(escalation_component),
+        "routing_component": _strict_ratio_score(routing_component),
+        "urgency_component": _strict_ratio_score(urgency_component),
+        "summary_component": _strict_ratio_score(summary_component),
+        "route_noise_penalty": _strict_ratio_score(noise_penalty),
+        "spam_penalty": _strict_ratio_score(
+            spam_penalty if _normalized_text(action.label) == "spam" else SCORE_EPSILON
+        ),
     }
     feedback = "Hard-task weighted policy grading completed."
     return RewardResult(score=score_value, breakdown=breakdown, feedback=feedback)

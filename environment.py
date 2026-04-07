@@ -195,16 +195,16 @@ class EmailTriageEnv:
             "emails_total": len(self._emails),
             "emails_processed": min(self._current_index, len(self._emails)),
             "emails_remaining": max(len(self._emails) - self._current_index, 0),
-            "base_score": round(base_score, 4),
-            "progress_signal": round(progress_signal, 4),
-            "step_cost": round(step_cost, 4),
-            "penalties": round(penalties, 4),
-            "trajectory_bonus": round(trajectory_bonus, 4),
+            "base_score": float(base_score),
+            "progress_signal": float(progress_signal),
+            "step_cost": float(step_cost),
+            "penalties": float(penalties),
+            "trajectory_bonus": float(trajectory_bonus),
             "grading_feedback": base_result.feedback,
         }
         for breakdown_key, breakdown_value in base_result.breakdown.items():
             if isinstance(breakdown_value, (int, float)):
-                info[f"grade_{breakdown_key}"] = round(float(breakdown_value), 4)
+                info[f"grade_{breakdown_key}"] = float(breakdown_value)
 
         return StepResult(
             observation=next_observation,
