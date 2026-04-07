@@ -15,6 +15,11 @@ ROUTE_ALIAS_MAP = {
 SCORE_EPSILON = 1e-6
 
 
+def _strict_binary_score(is_positive_case: bool) -> float:
+    """Return strict in-range score for binary outcomes."""
+    return 1.0 - SCORE_EPSILON if is_positive_case else SCORE_EPSILON
+
+
 def _clip_score(score_value: float) -> float:
     """Clip a score to the strict range (0.0, 1.0).
 
@@ -109,7 +114,7 @@ def _summary_keyword_score(summary_text: str, ground_truth: dict) -> float:
     """
     raw_keywords = ground_truth.get("summary_keywords", [])
     if not isinstance(raw_keywords, list):
-        return 1.0 if len(summary_text.strip()) >= 10 else 0.0
+        return _strict_binary_score(len(summary_text.strip()) >= 10)
 
     keywords = [
         _normalized_text(str(keyword))
@@ -117,7 +122,7 @@ def _summary_keyword_score(summary_text: str, ground_truth: dict) -> float:
         if _normalized_text(str(keyword))
     ]
     if not keywords:
-        return 1.0 if len(summary_text.strip()) >= 10 else 0.0
+        return _strict_binary_score(len(summary_text.strip()) >= 10)
 
     normalized_summary = _normalized_text(summary_text)
     matches = 0

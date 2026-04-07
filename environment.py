@@ -5,7 +5,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
-from graders import grade_easy, grade_hard, grade_medium_step
+from graders import SCORE_EPSILON, grade_easy, grade_hard, grade_medium_step
 from models import (
     EmailObservation,
     EnvironmentState,
@@ -117,7 +117,7 @@ class EmailTriageEnv:
         if self._done:
             return StepResult(
                 observation=self._terminal_observation(),
-                reward=0.0,
+                reward=SCORE_EPSILON,
                 done=True,
                 info={
                     "task_id": self.task_id,
@@ -132,11 +132,11 @@ class EmailTriageEnv:
             validated_action = TriageAction.model_validate(action)
         except ValidationError as validation_error:
             self._current_step += 1
-            self._reward_history.append(0.0)
+            self._reward_history.append(SCORE_EPSILON)
             self._done = self._current_step >= self._max_steps
             return StepResult(
                 observation=self._build_observation(self._current_index),
-                reward=0.0,
+                reward=SCORE_EPSILON,
                 done=self._done,
                 info={
                     "task_id": self.task_id,
@@ -351,8 +351,8 @@ class EmailTriageEnv:
         """
         if not self._ground_truth:
             return RewardResult(
-                score=0.0,
-                breakdown={"missing_ground_truth": 1.0},
+                score=SCORE_EPSILON,
+                breakdown={"missing_ground_truth": 1.0 - SCORE_EPSILON},
                 feedback="Missing ground truth for task.",
             )
 
@@ -458,7 +458,7 @@ class EmailTriageEnv:
         )
 
     def _clip_reward(self, reward_value: float) -> float:
-        """Clip reward to the inclusive range [-1.0, 1.0].
+        """Clip reward to the strict range (0.0, 1.0).
 
         Args:
             reward_value: Raw reward value.
@@ -466,4 +466,4 @@ class EmailTriageEnv:
         Returns:
             Clipped reward.
         """
-        return max(-1.0, min(1.0, reward_value))
+        return max(SCORE_EPSILON, min(1.0 - SCORE_EPSILON, reward_value))
