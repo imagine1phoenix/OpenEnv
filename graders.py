@@ -12,7 +12,8 @@ ROUTE_ALIAS_MAP = {
     "general": ["general", "inbox", "operations"],
 }
 
-SCORE_EPSILON = 1e-6
+# Keep a 2-decimal-safe margin so strict checks remain in-range after rounding.
+SCORE_EPSILON = 1e-2
 
 
 def _strict_binary_score(is_positive_case: bool) -> float:

@@ -144,11 +144,13 @@ def log_step(step: int, action_str: str, reward: float, done: bool, error: str |
     )
 
 
-def log_end(success: bool, steps: int, rewards: list[float]) -> None:
+def log_end(success: bool, steps: int, rewards: list[float], task_score: float) -> None:
     """Emit mandatory END line."""
     rewards_str = ",".join(_format_open_score(reward) for reward in rewards)
+    strict_task_score = _strict_task_score(task_score)
     print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        f"[END] task_score={_format_open_score(strict_task_score)} "
+        f"success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
     )
 
@@ -258,6 +260,7 @@ def run_episode(
     rewards: list[float] = []
     steps_taken = 0
     success = False
+    final_task_score = LOG_SCORE_EPSILON
     env: EmailTriageEnv | None = None
 
     log_start(task_name=task_id, benchmark_name=BENCHMARK, model_name=model_name)
@@ -304,7 +307,7 @@ def run_episode(
             action = parse_action_response(response_text)
             step_result = env.step(action)
 
-            reward = float(step_result.reward)
+            reward = _strict_task_score(float(step_result.reward))
             done = bool(step_result.done)
             error_raw = step_result.info.get("validation_error")
             error = str(error_raw) if isinstance(error_raw, str) else None
@@ -331,11 +334,12 @@ def run_episode(
         if not rewards:
             rewards.append(LOG_SCORE_EPSILON)
 
-        avg_reward = _strict_task_score(sum(rewards) / len(rewards))
-        success = avg_reward >= SUCCESS_SCORE_THRESHOLD
+        final_task_score = _strict_task_score(sum(rewards) / len(rewards))
+        success = final_task_score >= SUCCESS_SCORE_THRESHOLD
     except Exception:
         if not rewards:
             rewards.append(LOG_SCORE_EPSILON)
+        final_task_score = _strict_task_score(sum(rewards) / len(rewards))
         success = False
     finally:
         if env is not None:
@@ -346,7 +350,12 @@ def run_episode(
                 except Exception:
                     pass
 
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        log_end(
+            success=success,
+            steps=steps_taken,
+            rewards=rewards,
+            task_score=final_task_score,
+        )
 
 
 def main() -> None:
