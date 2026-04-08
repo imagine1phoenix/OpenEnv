@@ -23,7 +23,7 @@ MAX_STEPS = 30
 TEMPERATURE = 0.2
 MAX_TOKENS = 200
 SUCCESS_SCORE_THRESHOLD = 0.5
-LOG_SCORE_EPSILON = 1e-6
+LOG_SCORE_EPSILON = 1e-2
 DEFAULT_RUNTIME_BUDGET_SECONDS = int(os.getenv("INFERENCE_RUNTIME_BUDGET_SECONDS", "1140"))
 DEFAULT_REQUEST_TIMEOUT_SECONDS = float(os.getenv("INFERENCE_REQUEST_TIMEOUT_SECONDS", "12"))
 
@@ -123,9 +123,9 @@ def log_start(task_name: str, benchmark_name: str, model_name: str) -> None:
 
 
 def _format_open_score(value: float) -> str:
-    """Format scores without collapsing strict-open values to 0.00 or 1.00."""
+    """Format scores in strict-open range while preserving .2f log contract."""
     clamped = max(LOG_SCORE_EPSILON, min(1.0 - LOG_SCORE_EPSILON, float(value)))
-    return f"{clamped:.6f}"
+    return f"{clamped:.2f}"
 
 
 def log_step(step: int, action_str: str, reward: float, done: bool, error: str | None) -> None:
