@@ -128,6 +128,11 @@ def _format_open_score(value: float) -> str:
     return f"{clamped:.2f}"
 
 
+def _strict_task_score(raw_score: float) -> float:
+    """Return task score in strict-open interval for evaluator compatibility."""
+    return max(LOG_SCORE_EPSILON, min(1.0 - LOG_SCORE_EPSILON, float(raw_score)))
+
+
 def log_step(step: int, action_str: str, reward: float, done: bool, error: str | None) -> None:
     """Emit mandatory STEP line."""
     error_value = error if error else "null"
@@ -323,9 +328,14 @@ def run_episode(
             if done:
                 break
 
-        avg_reward = sum(rewards) / max(len(rewards), 1)
+        if not rewards:
+            rewards.append(LOG_SCORE_EPSILON)
+
+        avg_reward = _strict_task_score(sum(rewards) / len(rewards))
         success = avg_reward >= SUCCESS_SCORE_THRESHOLD
     except Exception:
+        if not rewards:
+            rewards.append(LOG_SCORE_EPSILON)
         success = False
     finally:
         if env is not None:
