@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
@@ -45,6 +46,17 @@ TASK_MAP = {
     "3": "task_hard",
     "4": "task_production",
 }
+
+
+@dataclass(frozen=True)
+class EpisodeResult:
+    """Represents one task episode outcome emitted by inference."""
+
+    task_id: str
+    scenario_index: int
+    score: float
+    steps: int
+    success: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -148,11 +160,55 @@ def log_end(success: bool, steps: int, rewards: list[float], task_score: float) 
     """Emit mandatory END line."""
     rewards_str = ",".join(_format_open_score(reward) for reward in rewards)
     strict_task_score = _strict_task_score(task_score)
+    score_str = _format_open_score(strict_task_score)
     print(
-        f"[END] task_score={_format_open_score(strict_task_score)} "
+        f"[END] score={score_str} task_score={score_str} "
         f"success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
     )
+
+
+def log_task_score(result: EpisodeResult) -> None:
+    """Emit explicit per-task score line for downstream validators."""
+    print(
+        "[TASK_SCORE] "
+        f"task={result.task_id} scenario={result.scenario_index} "
+        f"score={_format_open_score(result.score)} steps={result.steps} "
+        f"success={str(result.success).lower()}",
+        flush=True,
+    )
+
+
+def log_score_table(results: list[EpisodeResult], ordered_task_ids: list[str]) -> None:
+    """Emit a parse-friendly score table across tasks."""
+    if not results:
+        return
+
+    print("=== SCORE TABLE ===", flush=True)
+    print("Task\tScore\tEpisodes", flush=True)
+
+    task_means: list[float] = []
+    for task_id in ordered_task_ids:
+        task_scores = [item.score for item in results if item.task_id == task_id]
+        if not task_scores:
+            continue
+
+        task_mean = _strict_task_score(sum(task_scores) / len(task_scores))
+        task_means.append(task_mean)
+
+        print(
+            f"{task_id}\t{_format_open_score(task_mean)}\t{len(task_scores)}",
+            flush=True,
+        )
+        print(
+            f"[TASK_AGG] task={task_id} score={_format_open_score(task_mean)}",
+            flush=True,
+        )
+
+    if task_means:
+        mean_score = _strict_task_score(sum(task_means) / len(task_means))
+        print(f"Mean\t{_format_open_score(mean_score)}\t-", flush=True)
+        print(f"[MEAN_SCORE] score={_format_open_score(mean_score)}", flush=True)
 
 
 def build_user_prompt(observation: EmailObservation, history: list[str]) -> str:
@@ -255,7 +311,7 @@ def run_episode(
     deadline: float,
     request_timeout_seconds: float,
     runtime_options: dict[str, Any] | None = None,
-) -> None:
+) -> EpisodeResult:
     """Run one episode and emit strict START/STEP/END lines."""
     rewards: list[float] = []
     steps_taken = 0
@@ -357,6 +413,14 @@ def run_episode(
             task_score=final_task_score,
         )
 
+    return EpisodeResult(
+        task_id=task_id,
+        scenario_index=scenario_index,
+        score=_strict_task_score(final_task_score),
+        steps=steps_taken,
+        success=success,
+    )
+
 
 def main() -> None:
     """Entrypoint for running one or many tasks with strict stdout logs."""
@@ -378,6 +442,8 @@ def main() -> None:
     )
 
     task_ids = [TASK_MAP[args.task]] if args.task in TASK_MAP else list(TASK_MAP.values())
+    episode_results: list[EpisodeResult] = []
+
     for task_id in task_ids:
         runtime_options = None
         if task_id == "task_production":
@@ -387,7 +453,7 @@ def main() -> None:
                 "escalation_mode": args.escalation_mode,
             }
         for scenario_index in range(max(args.episodes_per_task, 1)):
-            run_episode(
+            result = run_episode(
                 client=client,
                 model_name=effective_model,
                 task_id=task_id,
@@ -397,6 +463,10 @@ def main() -> None:
                 request_timeout_seconds=request_timeout_seconds,
                 runtime_options=runtime_options,
             )
+            episode_results.append(result)
+            log_task_score(result)
+
+    log_score_table(episode_results, task_ids)
 
 
 if __name__ == "__main__":
